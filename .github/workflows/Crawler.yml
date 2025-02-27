@@ -2,27 +2,26 @@ name: 'Crawler'
 
 on:
   schedule:
-    - cron: '0 22 * * *'  
+    - cron: '0 22 * * *'  # UTC时间14点（北京时间22点）
   push:
     branches:
       - main
 
 jobs:
   arxiv-crawler:
-
     runs-on: ubuntu-latest
 
     steps:
       - name: 'Checkout'
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: 'Set time zone'
-        run: sudo timedatectl set-timezone 'Asia/Shanghai'
+        run: echo "TZ='Asia/Shanghai'" >> $GITHUB_ENV  # 更安全的时区设置方式
 
-      - name: 'Set up Python3.8'
-        uses: actions/setup-python@v1
+      - name: 'Set up Python'
+        uses: actions/setup-python@v4
         with:
-          python-version: 3.8
+          python-version: '3.12'  # 使用支持的版本
 
       - name: 'Install requirements'
         run: pip install -r ./requirements.txt
@@ -32,7 +31,7 @@ jobs:
 
       - name: 'Detect changes'
         id: detect_changes
-        run: if [ -n "$(git status --porcelain)" ]; then echo "::set-output name=changes_detected::yes"; fi
+        run: if [ -n "$(git status --porcelain)" ]; then echo "changes_detected=yes" >> $GITHUB_OUTPUT; fi
 
       - name: 'Push changes'
         if: steps.detect_changes.outputs.changes_detected == 'yes'
