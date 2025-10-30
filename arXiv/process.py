@@ -3,7 +3,7 @@ import re
 import time
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from configparser import ConfigParser
 from collections import defaultdict
 
@@ -54,7 +54,7 @@ def load_markdown(markdown_fp):
     with open(markdown_fp, "r", encoding='utf-8') as f:
         raw_markdown = f.read()
 
-    prog = re.compile('<summary>(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*)<\/summary>\n\n- \*(.+)\*\n\n- `(.+)`.* \[pdf\]\((.+)\)\n\n> (.+)\n\n<\/details>')
+    prog = re.compile(r'<summary>(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*)<\/summary>\n\n- \*(.+)\*\n\n- `(.+)`.* \[pdf\]\((.+)\)\n\n> (.+)\n\n<\/details>')
     matches = prog.findall(raw_markdown)
 
     results = []
@@ -72,33 +72,12 @@ def load_markdown(markdown_fp):
     return results
 
 
-def create_arxiv_client(page_size, delay_seconds, num_retries):
-    """创建ArXiv客户端"""
-    try:
-        # 使用基本的客户端配置
-        client = arxiv.Client(
-            page_size=int(page_size),
-            delay_seconds=int(delay_seconds),
-            num_retries=int(num_retries)
-        )
-        
-        logger.info("ArXiv客户端创建成功")
-        return client
-        
-    except Exception as e:
-        logger.error(f"创建ArXiv客户端失败: {e}")
-        raise
-
-
 def crawler(query,
             sort_by,
             sort_order,
             page_size,
             subjectcategory,
             max_results=float('inf')):
-    """
-    改进的爬虫函数，支持错误处理和重试机制
-    """
     # 参数处理
     query = json.loads(query)
     subjectcategory = json.loads(subjectcategory)
@@ -106,14 +85,12 @@ def crawler(query,
 
     logger.info(f"开始爬取，查询: {query}, 最大结果数: {max_results}")
 
-    try:
-        # 创建客户端 - 使用配置中的延迟和重试参数
-        delay_seconds = config.get('arXiv', 'delay_seconds', fallback='5')
-        max_retries = config.get('arXiv', 'max_retries', fallback='5')
-        client = create_arxiv_client(page_size, delay_seconds, max_retries)
-    except Exception as e:
-        logger.error(f"无法创建ArXiv客户端: {e}")
-        return
+    # client配置,每5秒一个API请求,出错重试5次
+    client = arxiv.Client(
+        page_size=int(page_size),
+        delay_seconds=5,
+        num_retries=5
+    )
 
     for subject, key_words in query.items():
         logger.info(f"开始处理主题: {subject}")
@@ -124,7 +101,6 @@ def crawler(query,
         # 每个关键字一个查询请求
         for key_word in key_words:
             logger.info(f"搜索关键词: {key_word}")
-            
             search = arxiv.Search(
                 query=key_word,
                 max_results=max_results,
@@ -134,7 +110,9 @@ def crawler(query,
 
             try:
                 paper_count = 0
-                for result in client.get(search):
+                
+                # 使用正确的当前API：使用 client.results(search)
+                for result in client.results(search):
                     # 是否在指定的类别内
                     for cate in result.categories:
                         if cate in subjectcategory:
@@ -148,40 +126,30 @@ def crawler(query,
                         continue
                     db_set.add(short_id)
 
-                    year = result.updated.tm_year
+                    year = result.updated.year
                     ori = dict()
                     ori['title'] = result.title
                     ori['authors'] = [author.name for author in result.authors]
                     ori['updated_sorted'] = result.updated
-                    ori['updated'] = time.strftime('%Y-%m-%d %H:%M:%S', result.updated)
+                    ori['updated'] = result.updated.strftime('%Y-%m-%d %H:%M:%S')
                     ori['summary'] = result.summary.replace('\n', ' ')
-                    ori['pdf_url'] = result.get_pdf_url()
+                    # 获取 PDF URL - 直接构建 URL
+                    short_id = result.get_short_id()
+                    ori['pdf_url'] = f"http://arxiv.org/pdf/{short_id}"
                     ori['short_id'] = result.get_short_id()
                     query_results[year].append(ori)
-                    paper_count += 1
                     
-                    # 每处理100篇论文记录一次
-                    if paper_count % 100 == 0:
+                    paper_count += 1
+                    if paper_count % 10 == 0:
                         logger.info(f"已处理 {paper_count} 篇论文")
-
-                logger.info(f"关键词 '{key_word}' 找到 {paper_count} 篇新论文")
-                
             except arxiv.UnexpectedEmptyPageError:
                 logger.warning(f"{subject}--{key_word}: arxiv.UnexpectedEmptyPageError")
-                time.sleep(10)  # 增加延迟重试
-                
-            except arxiv.HTTPError as e:
-                logger.error(f"{subject}--{key_word}: arxiv.HTTPError - {e}")
-                time.sleep(15)  # HTTP错误增加延迟
-                
+            except arxiv.HTTPError:
+                logger.warning(f"{subject}--{key_word}: arxiv.HTTPError")
             except Exception as error:
                 logger.error(f"{subject}--{key_word}: 未知错误 - {error}")
-                time.sleep(10)
 
         # 解析存储结果
-        total_new_papers = sum(len(results) for results in query_results.values())
-        logger.info(f"主题 '{subject}' 总共找到 {total_new_papers} 篇新论文")
-        
         for year, results in query_results.items():
             markdown_fp = os.path.join(arxiv_db_path, f'{year}.md')
             if os.path.exists(markdown_fp):
@@ -191,7 +159,31 @@ def crawler(query,
                     if item['short_id'] not in query_set:
                         old_results.append(item)
                 results = old_results
-            results = sorted(results, key=lambda item: item['updated_sorted'])
+                
+            # 标准化时间格式以便排序
+            def get_sort_key(item):
+                updated_sorted = item['updated_sorted']
+                if isinstance(updated_sorted, time.struct_time):
+                    # 转换 struct_time 为 datetime
+                    dt = datetime.fromtimestamp(time.mktime(updated_sorted))
+                    # 如果原时间是 UTC，添加 UTC 时区信息
+                    return dt.replace(tzinfo=timezone.utc)
+                elif isinstance(updated_sorted, datetime):
+                    # 已经是 datetime 对象
+                    if updated_sorted.tzinfo is None:
+                        # 如果没有时区信息，假设是 UTC
+                        return updated_sorted.replace(tzinfo=timezone.utc)
+                    else:
+                        return updated_sorted
+                else:
+                    # 尝试解析字符串
+                    try:
+                        dt = datetime.strptime(updated_sorted, '%Y-%m-%d %H:%M:%S')
+                        return dt.replace(tzinfo=timezone.utc)
+                    except:
+                        return datetime.min.replace(tzinfo=timezone.utc)
+            
+            results = sorted(results, key=get_sort_key)
 
             markdown = []
             markdown.append(f"# {year}\n")
@@ -219,29 +211,13 @@ def crawler(query,
 
             with open(markdown_fp, "w", encoding='utf-8') as f:
                 f.write("\n".join(markdown))
-                
-            logger.info(f"已更新 {year} 年的数据，共 {len(results)} 篇论文")
 
         if len(query_results) > 0:
             with open(os.path.join(arxiv_db_path, 'db.txt'), "w") as f:
                 db_str = json.dumps(list(db_set))
                 f.write(db_str)
-            logger.info(f"已更新 {subject} 主题的数据库记录")
-
-    logger.info("爬取完成！")
+                logger.info(f"已保存 {len(db_set)} 条记录到数据库")
 
 
 if __name__ == '__main__':
-    logger.info("=" * 50)
-    logger.info(f"开始运行Paper_Crawler - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("=" * 50)
-    
-    try:
-        crawler(**dict(config.items("arXiv")))
-        logger.info("=" * 50)
-        logger.info("Paper_Crawler 运行完成！")
-        logger.info("=" * 50)
-    except Exception as e:
-        logger.error(f"运行过程中出现错误: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    crawler(**dict(config.items("arXiv")))
