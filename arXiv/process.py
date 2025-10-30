@@ -42,8 +42,7 @@ def load_markdown(markdown_fp):
     with open(markdown_fp, "r", encoding='utf-8') as f:
         raw_markdown = f.read()
 
-    # 修复正则表达式中的转义序列问题
-    prog = re.compile(r'<summary>(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*?)</summary>\n\n- \\*(.*?)\\*\n\n- `(.*?)`.*? \[pdf\]\((.*?)\)\n\n> (.*?)\n\n</details>', re.DOTALL)
+    prog = re.compile('<summary>(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*)<\/summary>\n\n- \*(.+)\*\n\n- `(.+)`.* \[pdf\]\((.+)\)\n\n> (.+)\n\n<\/details>')
     matches = prog.findall(raw_markdown)
 
     results = []
@@ -112,19 +111,19 @@ def crawler(query,
                     ori['title'] = result.title
                     ori['authors'] = [author.name for author in result.authors]
                     ori['updated_sorted'] = result.updated
+                    # ori['published'] = time.strftime('%Y-%m-%d %H:%M:%S', result.published)
                     ori['updated'] = time.strftime('%Y-%m-%d %H:%M:%S', result.updated)
                     ori['summary'] = result.summary.replace('\n', ' ')
+                    # ori['comment'] = result.comment
+                    # ori['primary_category'] = result.primary_category
+                    # ori['categories'] = result.categories
                     ori['pdf_url'] = result.get_pdf_url()
                     ori['short_id'] = result.get_short_id()
                     query_results[year].append(ori)
             except arxiv.UnexpectedEmptyPageError:
                 print(f"{subject}--{key_word}: arxiv.UnexpectedEmptyPageError")
-            except arxiv.HTTPError as e:
-                print(f"{subject}--{key_word}: arxiv.HTTPError: {e}")
-                # 如果是重定向错误，可以尝试处理或等待后重试
-                if "301" in str(e):
-                    print("遇到重定向错误，等待10秒后重试...")
-                    time.sleep(10)
+            except arxiv.HTTPError:
+                print(f"{subject}--{key_word}: arxiv.HTTPError")
             except Exception as error:
                 print(f"{subject}--{key_word}: {error}")
 
@@ -138,7 +137,7 @@ def crawler(query,
                     if item['short_id'] not in query_set:
                         old_results.append(item)
                 results = old_results
-            results = sorted(results, key=lambda item: item['updated_sorted'], reverse=True)
+            results = sorted(results, key=lambda item: item['updated_sorted'])
 
             markdown = []
             markdown.append(f"# {year}\n")
@@ -157,7 +156,7 @@ def crawler(query,
                 content[ym].append(paper)
 
             markdown.append("## TOC\n")
-            toc = sorted(toc, reverse=True)
+            toc = sorted(toc)
             markdown.append("\n".join([f"- [{t}](#{t})" for t in toc])+'\n')
 
             for ym, papers in content.items():
