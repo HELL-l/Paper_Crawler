@@ -6,7 +6,8 @@ on:
   push:
     branches:
       - main
-
+  workflow_dispatch:
+  
 jobs:
   arxiv-crawler:
     runs-on: ubuntu-latest
