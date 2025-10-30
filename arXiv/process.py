@@ -8,9 +8,6 @@ from configparser import ConfigParser
 from collections import defaultdict
 
 import arxiv
-from fake_useragent import UserAgent
-import requests
-from retrying import retry
 
 # 配置日志
 logging.basicConfig(
@@ -75,28 +72,17 @@ def load_markdown(markdown_fp):
     return results
 
 
-@retry(stop_max_attempt_number=3, wait_fixed=10000)
 def create_arxiv_client(page_size, delay_seconds, num_retries):
-    """创建ArXiv客户端，带重试机制"""
+    """创建ArXiv客户端"""
     try:
-        # 创建带User-Agent的session
-        session = requests.Session()
-        ua = UserAgent()
-        session.headers.update({
-            'User-Agent': ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-        })
-        
+        # 使用基本的客户端配置
         client = arxiv.Client(
             page_size=int(page_size),
             delay_seconds=int(delay_seconds),
-            num_retries=int(num_retries),
-            http_client=session
+            num_retries=int(num_retries)
         )
         
+        logger.info("ArXiv客户端创建成功")
         return client
         
     except Exception as e:
@@ -121,9 +107,10 @@ def crawler(query,
     logger.info(f"开始爬取，查询: {query}, 最大结果数: {max_results}")
 
     try:
-        # 创建客户端
-        client = create_arxiv_client(page_size, 5, 5)
-        logger.info("ArXiv客户端创建成功")
+        # 创建客户端 - 使用配置中的延迟和重试参数
+        delay_seconds = config.get('arXiv', 'delay_seconds', fallback='5')
+        max_retries = config.get('arXiv', 'max_retries', fallback='5')
+        client = create_arxiv_client(page_size, delay_seconds, max_retries)
     except Exception as e:
         logger.error(f"无法创建ArXiv客户端: {e}")
         return
@@ -186,10 +173,6 @@ def crawler(query,
             except arxiv.HTTPError as e:
                 logger.error(f"{subject}--{key_word}: arxiv.HTTPError - {e}")
                 time.sleep(15)  # HTTP错误增加延迟
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"{subject}--{key_word}: 网络请求错误 - {e}")
-                time.sleep(20)
                 
             except Exception as error:
                 logger.error(f"{subject}--{key_word}: 未知错误 - {error}")
